@@ -5,16 +5,17 @@
 // Note: Order is (IN1, IN3, IN2, IN4) => (8, 10, 9, 11)
 AccelStepper stepper(AccelStepper::FULL4WIRE, 8, 10, 9, 11);
 
-// --- Split-Flap Parameters ---
+// Split-Flap parameters
 const long   STEPS_PER_REV   = 2048;     // typical 28BYJ-48 value
 const int    POSITIONS       = 37;       // A-Z, 0-9, blank
 const float  STEPS_PER_CHARF = (float)STEPS_PER_REV / (float)POSITIONS;
 const long   STEPS_PER_CHAR  = 55;       // Initial value (≈55.35), fine-tune later
+
 // Motion parameters
 const float  MAX_SPEED       = 500;      // Steps/s (later try 600–800)
 const float  ACCEL           = 300;      // Steps/s^2
 
-// Optional: Hall sensor for homing
+// Hall sensor for homing
 const int    HALL_PIN        = 6;        // A3144 -> OUT to D6, Vcc 5V, GND
 const bool   USE_HOMING      = true;     // set to false if no sensor present
 
