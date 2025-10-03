@@ -7,9 +7,10 @@ AccelStepper stepper(AccelStepper::FULL4WIRE, 8, 10, 9, 11);
 
 // Split-Flap parameters
 const long   STEPS_PER_REV   = 2048;     // typical 28BYJ-48 value
-const int    POSITIONS       = 37;       // A-Z, 0-9, blank
+const int    POSITIONS       = 45;       // 45 characters, see LETTERS array below
 const float  STEPS_PER_CHARF = (float)STEPS_PER_REV / (float)POSITIONS;
 const long   STEPS_PER_CHAR  = 55;       // Initial value (≈55.35), fine-tune later
+const String LETTERS[] = {" ","A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P","Q","R","S","T","U","V","W","X","Y","Z","Ä","Ö","Ü","0","1","2","3","4","5","6","7","8","9",":",".","-","?","!"};
 
 // Motion parameters
 const float  MAX_SPEED       = 500;      // Steps/s (later try 600–800)
@@ -31,10 +32,15 @@ int currentIndex = 0; // current character position [0..36]
  * @return int The corresponding index (0..36).
  */
 int charToIndex(char c) {
-  if (c >= 'A' && c <= 'Z') return c - 'A';
-  if (c >= 'a' && c <= 'z') return c - 'a';
-  if (c >= '0' && c <= '9') return 26 + (c - '0');
-  return 36; // everything else => blank
+  // Convert char to String for comparison
+  String s(1, c);
+  for (int i = 0; i < POSITIONS; ++i) {
+    if (LETTERS[i].equalsIgnoreCase(s)) {
+      return i;
+    }
+  }
+  // If not found, return 0 (space/blank)
+  return 0;
 }
 
 /**
