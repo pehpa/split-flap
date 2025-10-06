@@ -1,142 +1,260 @@
 #include <Arduino.h>
-#include <AccelStepper.h>
+#include <Stepper.h>
+#include <ctype.h>
+#include <string.h>
 
-// 28BYJ-48 via ULN2003 (4 wires), pin order: IN1, IN3, IN2, IN4
-// Note: Order is (IN1, IN3, IN2, IN4) => (8, 10, 9, 11)
-AccelStepper stepper(AccelStepper::FULL4WIRE, 8, 10, 9, 11);
+// ---------------------------
+// Konfiguration
+// ---------------------------
+const int IN1 = 8;
+const int IN2 = 9;
+const int IN3 = 10;
+const int IN4 = 11;
 
-// Split-Flap parameters
-const long   STEPS_PER_REV   = 2048;     // typical 28BYJ-48 value
-const int    POSITIONS       = 45;       // 45 characters, see LETTERS array below
-const float  STEPS_PER_CHARF = (float)STEPS_PER_REV / (float)POSITIONS;
-const long   STEPS_PER_CHAR  = 55;       // Initial value (≈55.35), fine-tune later
-const String LETTERS[] = {" ","A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P","Q","R","S","T","U","V","W","X","Y","Z","Ä","Ö","Ü","0","1","2","3","4","5","6","7","8","9",":",".","-","?","!"};
+const int HALL_PIN = 6;            // A3144: LOW = Magnet erkannt
+const int POSITIONS = 45;          // Anzahl Zeichen
+const long STEPS_PER_REV = 2048;   // 28BYJ-48 typisch
+const int STEPPER_RPM = 15;        // Vorgabe
 
-// Motion parameters
-const float  MAX_SPEED       = 500;      // Steps/s (later try 600–800)
-const float  ACCEL           = 300;      // Steps/s^2
+// Reihenfolge wichtig: (IN1, IN3, IN2, IN4) für 28BYJ-48 + ULN2003
+Stepper stepper(STEPS_PER_REV, IN1, IN3, IN2, IN4);
 
-// Hall sensor for homing
-const int    HALL_PIN        = 6;        // A3144 -> OUT to D6, Vcc 5V, GND
-const bool   USE_HOMING      = true;     // set to false if no sensor present
+// CCW-Richtung erzwingen
+const int DIR = -1;
 
-int currentIndex = 0; // current character position [0..36]
+// Zeichensatz (45 Einträge, Index 0..44)
+const char* LETTERS[] = {
+  " ","A","B","C","D","E","F","G","H","I","J","K","L","M","N","O","P","Q","R","S",
+  "T","U","V","W","X","Y","Z","Ä","Ö","Ü","0","1","2","3","4","5","6","7","8","9",
+  ":",".","-","?","!"
+};
+const int INDEX_UE = 29; // 'Ü'
 
-/**
- * @brief Maps a character to its corresponding split-flap index.
- *
- * Converts a character ('A'-'Z', 'a'-'z', '0'-'9', or others) to an index for the split-flap display.
- * Letters map to 0..25, digits to 26..35, and all other characters to 36 (blank).
- *
- * @param c The character to map.
- * @return int The corresponding index (0..36).
- */
-int charToIndex(char c) {
-  // Convert char to String for comparison
-  String s(1, c);
+// Schritte pro Zeichen (nicht ganzzahlig → Rest sammeln)
+const float STEPS_PER_CHAR_F = (float)STEPS_PER_REV / (float)POSITIONS;
+
+// ---------------------------
+// Zustände
+// ---------------------------
+volatile int currentIndex = 0;     // 0..44
+static float stepRemainder = 0.0f; // Korrektur für Nicht-Ganzzahligkeit
+
+// ---------------------------
+// Hilfsfunktionen
+// ---------------------------
+
+bool hallTriggered(uint16_t stableMs = 10) {
+  if (digitalRead(HALL_PIN) == LOW) {
+    delay(stableMs);
+    return (digitalRead(HALL_PIN) == LOW);
+  }
+  return false;
+}
+
+void moveDeltaCCW(int deltaChars) {
+  if (deltaChars <= 0) return;
+  stepper.setSpeed(STEPPER_RPM);
+
+  float want = (float)deltaChars * STEPS_PER_CHAR_F + stepRemainder;
+  long steps = lroundf(want);
+  stepRemainder = want - (float)steps;
+
+  stepper.step(DIR * steps);
+  currentIndex = (currentIndex + deltaChars) % POSITIONS;
+}
+
+void goToIndexCCW(int targetIndex) {
+  targetIndex = (targetIndex % POSITIONS + POSITIONS) % POSITIONS;
+  int delta = (targetIndex - currentIndex + POSITIONS) % POSITIONS; // 0..POSITIONS-1
+  moveDeltaCCW(delta);
+}
+
+int findIndexBySymbol(const char* sym) {
   for (int i = 0; i < POSITIONS; ++i) {
-    if (LETTERS[i].equalsIgnoreCase(s)) {
-      return i;
+    if (strcmp(sym, LETTERS[i]) == 0) return i;
+  }
+  return -1;
+}
+
+// Hilfsfunktionen für Case-Handling
+static inline char toUpperAscii(char c) {
+  if (c >= 'a' && c <= 'z') return c - 'a' + 'A';
+  return c;
+}
+
+// Vergleicht case-insensitive nur für ASCII (A-Z); Sonderzeichen bleiben wie sind
+bool eqIgnoreCaseAscii(const char* a, const char* b) {
+  while (*a && *b) {
+    char ca = toUpperAscii(*a++);
+    char cb = toUpperAscii(*b++);
+    if (ca != cb) return false;
+  }
+  return (*a == '\0' && *b == '\0');
+}
+
+// Konvertiere ASCII-Token in Uppercase (nur A-Z), belasse UTF-8 Umlaute
+void asciiUpperInPlace(char* s) {
+  for (size_t i = 0; s[i]; ++i) {
+    if ((unsigned char)s[i] < 0x80) { // ASCII
+      s[i] = toUpperAscii(s[i]);
     }
   }
-  // If not found, return 0 (space/blank)
-  return 0;
 }
 
-/**
- * @brief Moves the stepper to the specified character index.
- *
- * Calculates the shortest forward path to the target index and sets the stepper's target position accordingly.
- *
- * @param targetIndex The desired character index to move to (0..36).
- */
-void goToIndex(int targetIndex) {
-  // shortest forward path (simple version)
-  int delta = (targetIndex - currentIndex + POSITIONS) % POSITIONS;
-  long targetSteps = stepper.currentPosition() + delta * STEPS_PER_CHAR;
-  stepper.moveTo(targetSteps);
+// Mappe Eingabe-Token auf Index im LETTERS[]
+// Unterstützt:
+//  - direktes UTF-8 „Ä/Ö/Ü“ (auch klein „ä/ö/ü“ → zu Großbuchstaben)
+//  - ASCII-Buchstaben case-insensitive
+//  - Fallbacks "AE"→Ä, "OE"→Ö, "UE"→Ü (case-insensitive)
+//  - Satzzeichen : . - ? !
+//  -SPACE per: " " (ein Leerzeichen) ODER "SPACE" / "BLANK" / "_" ODER leeres Token nach 'c' (c<Enter>)
+int symbolToIndex(char* token) {
+  if (!token) return -1;
 
-}
+  // Sonderfall: direkt Leerzeichen / SPACE-Befehle
+  if (strcmp(token, " ") == 0) return 0;
+  if (eqIgnoreCaseAscii(token, "SPACE") || eqIgnoreCaseAscii(token, "BLANK") || strcmp(token, "_") == 0) return 0;
+  if (token[0] == '\0') return 0; // c<Enter> -> space
 
-/**
- * @brief Performs homing routine if enabled.
- *
- * If USE_HOMING is true, rotates the stepper motor slowly until the Hall sensor is triggered.
- * Sets the current position to zero when the sensor is activated and restores motion parameters.
- * Prints status information to the serial monitor during the process.
- */
-void homeIfEnabled() {
-  if (!USE_HOMING) return;
+  // Wenn genau UTF-8 Umlaute klein: mappe auf Groß
+  if (strcmp(token, "ä") == 0) return findIndexBySymbol("Ä");
+  if (strcmp(token, "ö") == 0) return findIndexBySymbol("Ö");
+  if (strcmp(token, "ü") == 0) return findIndexBySymbol("Ü");
 
-  Serial.println("HOMING");
+  // Direktes Match (inkl. "Ä","Ö","Ü" groß, sowie Satzzeichen)
+  int idx = findIndexBySymbol(token);
+  if (idx >= 0) return idx;
 
-  pinMode(HALL_PIN, INPUT_PULLUP);
-  // Rotate slowly until sensor triggers (LOW, depending on wiring)
-  stepper.setMaxSpeed(200);
-  stepper.setAcceleration(200);
-  stepper.setSpeed(150); // constant speed for homing
-  
-  Serial.println(digitalRead(HALL_PIN));
-  
-  while (digitalRead(HALL_PIN) == HIGH) { // HIGH = not triggered (typical)
-    stepper.runSpeed(); // constant speed without ramps
-    Serial.println(digitalRead(HALL_PIN));
+  // Fallbacks AE/OE/UE (case-insensitive ASCII)
+  if (eqIgnoreCaseAscii(token, "AE")) return findIndexBySymbol("Ä");
+  if (eqIgnoreCaseAscii(token, "OE")) return findIndexBySymbol("Ö");
+  if (eqIgnoreCaseAscii(token, "UE")) return findIndexBySymbol("Ü");
+
+  // Einzelzeichen ASCII → uppercase und suchen
+  if (strlen(token) == 1 && (unsigned char)token[0] < 0x80) {
+    char up[2] = { toUpperAscii(token[0]), 0 };
+    return findIndexBySymbol(up);
   }
-  Serial.println(digitalRead(HALL_PIN));
-  // Reference found
-  stepper.setCurrentPosition(0);
-  currentIndex = 0;
 
-  // Restore motion parameters
-  stepper.setMaxSpeed(MAX_SPEED);
-  stepper.setAcceleration(ACCEL);
+  // Letzter Versuch: gesamtes Token ASCII-uppercase und vergleichen (für z. B. "a")
+  {
+    char buf[8];
+    strncpy(buf, token, sizeof(buf) - 1);
+    buf[sizeof(buf)-1] = 0;
+    asciiUpperInPlace(buf);
+    idx = findIndexBySymbol(buf);
+    if (idx >= 0) return idx;
+  }
+
+  return -1;
 }
 
-/**
- * @brief Arduino setup function. Initializes stepper parameters, serial communication, and performs homing if enabled.
- *
- * Sets the maximum speed and acceleration for the stepper motor, starts serial communication,
- * performs homing if the USE_HOMING flag is set, and prints instructions to the serial monitor.
- */
-void setup() {
-  stepper.setMaxSpeed(MAX_SPEED);
-  stepper.setAcceleration(ACCEL);
+// Homing: langsam CCW, bis Hall auslöst (diese Position ist „Ü“)
+void homeAtUE() {
+  Serial.println(F("[Homing] CCW bis Hall (Ü) triggert..."));
+  stepper.setSpeed(6); // langsam & sicher
 
-  // Demo: send a character via Serial, e.g. 'A', 'B', '3', ' ' (space)
-  Serial.begin(115200);
+  unsigned long safety = STEPS_PER_REV * 4; // großzügige Grenze
+  while (!hallTriggered(5) && safety > 0) {
+    stepper.step(DIR * 1);
+    safety--;
+  }
 
-  if (USE_HOMING) homeIfEnabled();
+  if (safety == 0) {
+    Serial.println(F("[Homing] WARNUNG: Hall nicht gefunden – setze aktuelle Position als Ü."));
+  } else {
+    Serial.println(F("[Homing] Hall erkannt."));
+  }
 
-  Serial.println(F("Send a letter A-Z, digit 0-9, or space for blank."));
+  // Optional Feinkorrektur:
+  // for (int i=0; i<3; ++i) stepper.step(DIR * 1);
+
+  currentIndex = INDEX_UE;
+  stepRemainder = 0.0f;
+
+  Serial.print(F("[Homing] currentIndex="));
+  Serial.println(currentIndex);
 }
 
-/**
- * @brief Arduino main loop function. Handles serial input and stepper control.
- *
- * Reads characters from the serial interface, maps them to split-flap positions,
- * and commands the stepper motor to move accordingly. Disables stepper outputs
- * when movement is complete.
- */
-void loop() {
-  // New target via Serial?
-  if (Serial.available()) {
+// ---------------------------
+// Serielle Steuerung
+// Befehle:
+//   iNN     -> Index 0..44
+//   cTEXT   -> Zeichen (UTF-8: Ä/Ö/Ü; ae/oe/ue; ASCII case-insensitive; SPACE/BLANK/_; c<Leerzeichen>)
+//   h       -> homing
+//   ?       -> Hilfe
+// ---------------------------
+void printHelp() {
+  Serial.println(F("\nCommands:"));
+  Serial.println(F("  iNN   -> go to index NN (0..44), CCW only"));
+  Serial.println(F("  cX    -> go to symbol X (UTF-8: Ä/Ö/Ü; Fallbacks: AE/OE/UE; case-insensitive)"));
+  Serial.println(F("          Space:  c<space>  oder  cSPACE / cBLANK / c_  oder  c<Enter>"));
+  Serial.println(F("  h     -> home to Hall (Ü)"));
+  Serial.println(F("  ?     -> help"));
+}
+
+void handleSerial() {
+  static char buf[64];
+  static uint8_t len = 0;
+
+  while (Serial.available()) {
     char c = Serial.read();
-    if (c == '\n' || c == '\r') {
-      // ignore
+    if (c == '\r' || c == '\n') {
+      buf[len] = '\0';
+      if (len > 0) {
+        Serial.print(F("[RX] ")); Serial.println(buf);  // Eingabe anzeigen
+
+        if (buf[0] == 'i' || buf[0] == 'I') {
+          int idx = atoi(buf + 1);
+          if (idx >= 0 && idx < POSITIONS) {
+            Serial.print(F("[Goto] index ")); Serial.println(idx);
+            goToIndexCCW(idx);
+          } else {
+            Serial.println(F("[Error] Index 0..44"));
+          }
+        } else if (buf[0] == 'c' || buf[0] == 'C') {
+          // Alles nach 'c' ist Token – NICHT führende Spaces entfernen, damit 'c ' (Leerzeichen) funktioniert
+          char* tok = buf + 1;                  // kann leer sein -> Space
+          // Entferne nur ein einziges führendes Tab/CR, aber nicht das Space
+          if (*tok == '\t' || *tok == '\r') tok++;
+
+          int idx = symbolToIndex(tok);
+          if (idx >= 0) {
+            Serial.print(F("[Goto] symbol → index ")); Serial.println(idx);
+            goToIndexCCW(idx);
+          } else {
+            Serial.println(F("[Error] Symbol nicht im Set"));
+          }
+        } else if (buf[0] == 'h' || buf[0] == 'H') {
+          homeAtUE();
+        } else if (buf[0] == '?') {
+          printHelp();
+        } else {
+          Serial.println(F("[Unknown] '?' fuer Hilfe"));
+        }
+      }
+      len = 0;
     } else {
-      int target = charToIndex(c);
-      stepper.enableOutputs();
-      goToIndex(target);
-      currentIndex = target;
-      Serial.print(F("Set to: ")); Serial.print(c);
-      Serial.print(F(" (Index ")); Serial.print(target); Serial.println(F(")"));
+      if (len < sizeof(buf) - 1) buf[len++] = c;
     }
   }
+}
 
-  // Execute movement (ramps)
-  stepper.run();
+// ---------------------------
+// Arduino setup/loop
+// ---------------------------
+void setup() {
+  pinMode(HALL_PIN, INPUT_PULLUP);
+  Serial.begin(115200);
+  delay(50);
+  Serial.println(F("\nSplit-Flap (Stepper.h) | CCW | 45 Symbole | Home=Ü via Hall | Speed=15 RPM"));
+  printHelp();
 
-  if (stepper.distanceToGo() == 0) {
-    stepper.disableOutputs();
-  }
+  stepper.setSpeed(STEPPER_RPM);
+  homeAtUE();
+}
+
+void loop() {
+  handleSerial();
+  // Platz für eigene Demo-Bewegungen
 }
