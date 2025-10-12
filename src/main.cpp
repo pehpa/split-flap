@@ -14,7 +14,7 @@ const int IN4 = 11;
 const int HALL_PIN = 6;            // A3144: LOW = Magnet erkannt
 const int POSITIONS = 45;          // Anzahl Zeichen
 const long STEPS_PER_REV = 2048;   // 28BYJ-48 typisch
-const int STEPPER_RPM = 15;        // Vorgabe
+const int STEPPER_RPM = 15;        // Vorgabe original: 15
 
 // Reihenfolge wichtig: (IN1, IN3, IN2, IN4) für 28BYJ-48 + ULN2003
 Stepper stepper(STEPS_PER_REV, IN1, IN3, IN2, IN4);
@@ -190,7 +190,41 @@ void printHelp() {
   Serial.println(F("  cX    -> go to symbol X (UTF-8: Ä/Ö/Ü; Fallbacks: AE/OE/UE; case-insensitive)"));
   Serial.println(F("          Space:  c<space>  oder  cSPACE / cBLANK / c_  oder  c<Enter>"));
   Serial.println(F("  h     -> home to Hall (Ü)"));
+  Serial.println(F("  b     -> test backwards through all symbols"));
+  Serial.println(F("  f     -> test forwards through all symbols"));
+  Serial.println(F("  r     -> test random 10 positions"));
   Serial.println(F("  ?     -> help"));
+}
+
+void testBackwards() {
+  Serial.println(F("[Test] Backwards through all symbols..."));
+  for (int i = POSITIONS - 1; i >= 0; --i) {
+    Serial.print(F("[Test] Goto index ")); Serial.print(i); Serial.print(F(" (")); Serial.print(LETTERS[i]); Serial.println(F(")"));
+    goToIndexCCW(i);
+    delay(500);
+  }
+  Serial.println(F("[Test] Done."));
+}
+
+void testForwards() {
+  Serial.println(F("[Test] Forwards through all symbols..."));
+  for (int i = 0; i < POSITIONS; ++i) {
+    Serial.print(F("[Test] Goto index ")); Serial.print(i); Serial.print(F(" (")); Serial.print(LETTERS[i]); Serial.println(F(")"));
+    goToIndexCCW(i);
+    delay(500);
+  }
+  Serial.println(F("[Test] Done."));
+}
+
+void testRandom10() {
+  Serial.println(F("[Test] Random 10 positions..."));
+  for (int i = 0; i < 10; ++i) {
+    int idx = random(0, POSITIONS);
+    Serial.print(F("[Test] Goto index ")); Serial.print(idx); Serial.print(F(" (")); Serial.print(LETTERS[idx]); Serial.println(F(")"));
+    goToIndexCCW(idx);
+    delay(500);
+  }
+  Serial.println(F("[Test] Done."));
 }
 
 void handleSerial() {
@@ -227,6 +261,12 @@ void handleSerial() {
           }
         } else if (buf[0] == 'h' || buf[0] == 'H') {
           homeAtUE();
+        } else if (buf[0] == 'b' || buf[0] == 'B') {
+          testBackwards();
+        } else if (buf[0] == 'f' || buf[0] == 'F') {
+          testForwards();
+        } else if (buf[0] == 'r' || buf[0] == 'R') {
+          testRandom10();
         } else if (buf[0] == '?') {
           printHelp();
         } else {
